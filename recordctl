@@ -39,15 +39,7 @@ require_cmd() {
 
 list_devices() {
   require_cmd arecord
-  arecord -l | awk '
-    /^card [0-9]+:/ {
-      card=$2; gsub(":", "", card)
-      name=$0
-    }
-    /^  Subdevices:/ {
-      if (name != "") print name
-    }
-  '
+  arecord -l
 }
 
 list_hw_devices() {
@@ -55,10 +47,18 @@ list_hw_devices() {
   arecord -l | awk -v re="$DEVICE_REGEX" '
     /^card [0-9]+:/ {
       card=$2; gsub(":", "", card)
-      dev=0
-      line=$0
-      if (line ~ re) {
-        print "hw:" card "," dev "\t" line
+      card_line=$0
+      next
+    }
+    /^[[:space:]]*device [0-9]+:/ {
+      if (card == "") next
+
+      device=$2
+      gsub(":", "", device)
+
+      full_line=card_line " | " $0
+      if (full_line ~ re) {
+        print "hw:" card "," device "\t" full_line
       }
     }
   '

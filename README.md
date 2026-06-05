@@ -1,6 +1,6 @@
 # Raspberry Pi Multitrack USB Recorder
 
-Records from all available ALSA capture devices into one WAV file per device.
+Records from all matching ALSA capture devices into one WAV file per device.
 
 The default command is a toggle:
 
@@ -24,6 +24,9 @@ arecord -l
 ./recordctl devices
 ```
 
+By default, `./recordctl devices` only includes devices whose ALSA card/device
+description matches `DEVICE_REGEX` from `recordctl.conf`.
+
 ## Start and stop
 
 ```bash
@@ -46,7 +49,7 @@ Recordings are saved into:
 recordings/session_YYYYMMDD_HHMMSS/
 ```
 
-Each USB sound card gets its own WAV file.
+Each matched capture device gets its own WAV file.
 
 ## Merge last session into one multichannel WAV
 
