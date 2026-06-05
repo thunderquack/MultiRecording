@@ -27,6 +27,9 @@ arecord -l
 By default, `./recordctl devices` only includes devices whose ALSA card/device
 description matches `DEVICE_REGEX` from `recordctl.conf`.
 
+Set `DEVICE_REGEX=""` or `DEVICE_REGEX=".*"` in `recordctl.conf` to use all
+detected capture devices.
+
 ## Start and stop
 
 ```bash

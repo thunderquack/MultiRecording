@@ -57,7 +57,7 @@ list_hw_devices() {
       gsub(":", "", device)
 
       full_line=card_line " | " $0
-      if (full_line ~ re) {
+      if (re == "" || re == ".*" || full_line ~ re) {
         print "hw:" card "," device "\t" full_line
       }
     }
