@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$PROJECT_DIR/recordctl.conf"
+
+# Defaults. Can be overridden in recordctl.conf
+RATE="48000"
+FORMAT="S16_LE"
+CHANNELS="1"
+OUT_DIR="$PROJECT_DIR/recordings"
+DEVICE_REGEX="USB|Audio|Device|Mic|Microphone|PnP"
+AUTO_MERGE="0"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+fi
+
+STATE_DIR="$OUT_DIR/.state"
+PID_FILE="$STATE_DIR/recording.pids"
+SESSION_FILE="$STATE_DIR/current_session"
+LOG_FILE="$STATE_DIR/recordctl.log"
+
+mkdir -p "$OUT_DIR" "$STATE_DIR"
+
+log() {
+  local msg="$1"
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" | tee -a "$LOG_FILE"
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing command: $1" >&2
+    echo "Install it, for example: sudo apt install alsa-utils ffmpeg" >&2
+    exit 1
+  fi
+}
+
+list_devices() {
+  require_cmd arecord
+  arecord -l | awk '
+    /^card [0-9]+:/ {
+      card=$2; gsub(":", "", card)
+      name=$0
+    }
+    /^  Subdevices:/ {
+      if (name != "") print name
+    }
+  '
+}
+
+list_hw_devices() {
+  require_cmd arecord
+  arecord -l | awk -v re="$DEVICE_REGEX" '
+    /^card [0-9]+:/ {
+      card=$2; gsub(":", "", card)
+      dev=0
+      line=$0
+      if (line ~ re) {
+        print "hw:" card "," dev "\t" line
+      }
+    }
+  '
+}
+
+is_recording() {
+  [[ -f "$PID_FILE" ]] || return 1
+
+  local alive=0
+  while read -r pid rest; do
+    [[ -z "${pid:-}" ]] && continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      alive=1
+    fi
+  done < "$PID_FILE"
+
+  [[ "$alive" == "1" ]]
+}
+
+status() {
+  if is_recording; then
+    local session=""
+    [[ -f "$SESSION_FILE" ]] && session="$(cat "$SESSION_FILE")"
+    echo "Recording: YES"
+    echo "Session: $session"
+    echo "Processes:"
+    cat "$PID_FILE"
+  else
+    echo "Recording: NO"
+  fi
+}
+
+start_recording() {
+  require_cmd arecord
+
+  if is_recording; then
+    echo "Already recording."
+    status
+    exit 0
+  fi
+
+  local timestamp session_dir manifest count
+  timestamp="$(date '+%Y%m%d_%H%M%S')"
+  session_dir="$OUT_DIR/session_$timestamp"
+  manifest="$session_dir/manifest.tsv"
+  mkdir -p "$session_dir"
+  : > "$PID_FILE"
+  : > "$manifest"
+
+  count=0
+  while IFS=$'\t' read -r hw description; do
+    [[ -z "${hw:-}" ]] && continue
+    count=$((count + 1))
+    local safe_hw outfile errfile
+    safe_hw="${hw//:/_}"
+    safe_hw="${safe_hw//,/_}"
+    outfile="$session_dir/track_${count}_${safe_hw}.wav"
+    errfile="$session_dir/track_${count}_${safe_hw}.log"
+
+    log "Starting $hw -> $outfile"
+
+    arecord \
+      -D "$hw" \
+      -f "$FORMAT" \
+      -r "$RATE" \
+      -c "$CHANNELS" \
+      "$outfile" \
+      >"$errfile" 2>&1 &
+
+    local pid=$!
+    printf '%s\t%s\t%s\n' "$pid" "$hw" "$outfile" >> "$PID_FILE"
+    printf '%s\t%s\t%s\n' "$count" "$hw" "$outfile" >> "$manifest"
+  done < <(list_hw_devices)
+
+  if [[ "$count" -eq 0 ]]; then
+    rm -f "$PID_FILE"
+    echo "No capture devices found. Check: arecord -l" >&2
+    exit 1
+  fi
+
+  echo "$session_dir" > "$SESSION_FILE"
+
+  echo "Recording started."
+  echo "Session: $session_dir"
+  echo "Tracks: $count"
+  echo
+  echo "Run again to stop: ./recordctl"
+  echo "Or explicitly:   ./recordctl stop"
+}
+
+stop_recording() {
+  if ! [[ -f "$PID_FILE" ]]; then
+    echo "Not recording."
+    exit 0
+  fi
+
+  local session_dir=""
+  [[ -f "$SESSION_FILE" ]] && session_dir="$(cat "$SESSION_FILE")"
+
+  log "Stopping recording"
+
+  while read -r pid hw outfile; do
+    [[ -z "${pid:-}" ]] && continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -INT "$pid" >/dev/null 2>&1 || true
+    fi
+  done < "$PID_FILE"
+
+  sleep 1
+
+  while read -r pid hw outfile; do
+    [[ -z "${pid:-}" ]] && continue
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -TERM "$pid" >/dev/null 2>&1 || true
+    fi
+  done < "$PID_FILE"
+
+  rm -f "$PID_FILE" "$SESSION_FILE"
+
+  echo "Recording stopped."
+  if [[ -n "$session_dir" ]]; then
+    echo "Session: $session_dir"
+    ls -lh "$session_dir"/*.wav 2>/dev/null || true
+
+    if [[ "$AUTO_MERGE" == "1" ]]; then
+      merge_session "$session_dir" || true
+    fi
+  fi
+}
+
+merge_session() {
+  require_cmd ffmpeg
+  local session_dir="$1"
+  local manifest="$session_dir/manifest.tsv"
+  local output="$session_dir/multitrack.wav"
+
+  if [[ ! -f "$manifest" ]]; then
+    echo "No manifest found in $session_dir" >&2
+    exit 1
+  fi
+
+  local inputs=()
+  local labels=""
+  local n=0
+  while IFS=$'\t' read -r index hw outfile; do
+    [[ -f "$outfile" ]] || continue
+    inputs+=("-i" "$outfile")
+    labels+="[$n:a]"
+    n=$((n + 1))
+  done < "$manifest"
+
+  if [[ "$n" -eq 0 ]]; then
+    echo "No WAV files to merge." >&2
+    exit 1
+  fi
+
+  echo "Merging $n tracks into: $output"
+  ffmpeg -y \
+    "${inputs[@]}" \
+    -filter_complex "${labels}amerge=inputs=${n}[a]" \
+    -map "[a]" \
+    -c:a pcm_s16le \
+    "$output"
+
+  echo "Created: $output"
+}
+
+install_systemd_user() {
+  local service_dir="$HOME/.config/systemd/user"
+  mkdir -p "$service_dir"
+
+  cat > "$service_dir/recordctl-toggle.service" <<EOF_SERVICE
+[Unit]
+Description=Toggle multitrack USB audio recording
+
+[Service]
+Type=oneshot
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$PROJECT_DIR/recordctl toggle
+EOF_SERVICE
+
+  systemctl --user daemon-reload
+
+  echo "Installed user service: recordctl-toggle.service"
+  echo "Test it with: systemctl --user start recordctl-toggle.service"
+  echo "You can bind this command to a desktop shortcut or hardware button."
+}
+
+case "${1:-toggle}" in
+  toggle)
+    if is_recording; then
+      stop_recording
+    else
+      start_recording
+    fi
+    ;;
+  start)
+    start_recording
+    ;;
+  stop)
+    stop_recording
+    ;;
+  status)
+    status
+    ;;
+  devices)
+    list_hw_devices
+    ;;
+  raw-devices)
+    list_devices
+    ;;
+  merge-last)
+    if [[ -f "$SESSION_FILE" ]]; then
+      echo "Cannot merge while current recording session is active." >&2
+      exit 1
+    fi
+    last_session="$(find "$OUT_DIR" -maxdepth 1 -type d -name 'session_*' | sort | tail -n 1)"
+    [[ -n "${last_session:-}" ]] || { echo "No sessions found." >&2; exit 1; }
+    merge_session "$last_session"
+    ;;
+  install-systemd-user)
+    install_systemd_user
+    ;;
+  *)
+    cat <<EOF_HELP
+Usage: ./recordctl [command]
+
+Commands:
+  toggle                Start if stopped, stop if recording. Default command.
+  start                 Start recording all detected capture devices.
+  stop                  Stop recording.
+  status                Show current recording status.
+  devices               Show detected ALSA hw capture devices.
+  raw-devices           Show raw arecord device lines.
+  merge-last            Merge last session into one multichannel WAV using ffmpeg.
+  install-systemd-user  Install a systemd user service for one-button toggle.
+
+Config file:
+  recordctl.conf
+EOF_HELP
+    ;;
+esac
