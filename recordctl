@@ -48,6 +48,17 @@ list_hw_devices() {
     /^card [0-9]+:/ {
       card=$2; gsub(":", "", card)
       card_line=$0
+
+      if (match($0, /, device [0-9]+:/)) {
+        device_part=substr($0, RSTART, RLENGTH)
+        sub(/^, device /, "", device_part)
+        sub(/:$/, "", device_part)
+
+        if (re == "" || re == ".*" || $0 ~ re) {
+          print "hw:" card "," device_part "\t" $0
+        }
+      }
+
       next
     }
     /^[[:space:]]*device [0-9]+:/ {
