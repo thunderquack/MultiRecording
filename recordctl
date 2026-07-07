@@ -11,6 +11,8 @@ CHANNELS="1"
 OUT_DIR="$PROJECT_DIR/recordings"
 DEVICE_REGEX="USB|Audio|Device|Mic|Microphone|PnP"
 AUTO_MERGE="0"
+OUTPUT_FORMAT="wav"
+MP3_BITRATE="192k"
 
 if [[ -f "$CONFIG_FILE" ]]; then
   # shellcheck source=/dev/null
@@ -27,6 +29,18 @@ mkdir -p "$OUT_DIR" "$STATE_DIR"
 log() {
   local msg="$1"
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" | tee -a "$LOG_FILE"
+}
+
+audio_extension() {
+  case "$OUTPUT_FORMAT" in
+    wav) echo "wav" ;;
+    mp3) echo "mp3" ;;
+    *)
+      echo "Unsupported OUTPUT_FORMAT: $OUTPUT_FORMAT" >&2
+      echo "Use one of: wav, mp3" >&2
+      exit 1
+      ;;
+  esac
 }
 
 require_cmd() {
@@ -104,6 +118,12 @@ status() {
 
 start_recording() {
   require_cmd arecord
+  local ext
+  ext="$(audio_extension)"
+
+  if [[ "$OUTPUT_FORMAT" == "mp3" ]]; then
+    require_cmd ffmpeg
+  fi
 
   if is_recording; then
     echo "Already recording."
@@ -126,18 +146,30 @@ start_recording() {
     local safe_hw outfile errfile
     safe_hw="${hw//:/_}"
     safe_hw="${safe_hw//,/_}"
-    outfile="$session_dir/track_${count}_${safe_hw}.wav"
+    outfile="$session_dir/track_${count}_${safe_hw}.${ext}"
     errfile="$session_dir/track_${count}_${safe_hw}.log"
 
     log "Starting $hw -> $outfile"
 
-    arecord \
-      -D "$hw" \
-      -f "$FORMAT" \
-      -r "$RATE" \
-      -c "$CHANNELS" \
-      "$outfile" \
-      >"$errfile" 2>&1 &
+    if [[ "$OUTPUT_FORMAT" == "wav" ]]; then
+      arecord \
+        -D "$hw" \
+        -f "$FORMAT" \
+        -r "$RATE" \
+        -c "$CHANNELS" \
+        "$outfile" \
+        >"$errfile" 2>&1 &
+    else
+      ffmpeg -hide_banner -loglevel error -y \
+        -f alsa \
+        -sample_rate "$RATE" \
+        -channels "$CHANNELS" \
+        -i "$hw" \
+        -c:a libmp3lame \
+        -b:a "$MP3_BITRATE" \
+        "$outfile" \
+        >"$errfile" 2>&1 &
+    fi
 
     local pid=$!
     printf '%s\t%s\t%s\n' "$pid" "$hw" "$outfile" >> "$PID_FILE"
@@ -192,7 +224,7 @@ stop_recording() {
   echo "Recording stopped."
   if [[ -n "$session_dir" ]]; then
     echo "Session: $session_dir"
-    ls -lh "$session_dir"/*.wav 2>/dev/null || true
+    find "$session_dir" -maxdepth 1 -type f \( -name '*.wav' -o -name '*.mp3' \) -print0 | xargs -0 ls -lh 2>/dev/null || true
 
     if [[ "$AUTO_MERGE" == "1" ]]; then
       merge_session "$session_dir" || true
@@ -286,6 +318,10 @@ case "${1:-toggle}" in
       echo "Cannot merge while current recording session is active." >&2
       exit 1
     fi
+    if [[ "$OUTPUT_FORMAT" != "wav" ]]; then
+      echo "merge-last currently expects per-device WAV recording. Set OUTPUT_FORMAT=\"wav\" for merge support." >&2
+      exit 1
+    fi
     last_session="$(find "$OUT_DIR" -maxdepth 1 -type d -name 'session_*' | sort | tail -n 1)"
     [[ -n "${last_session:-}" ]] || { echo "No sessions found." >&2; exit 1; }
     merge_session "$last_session"
@@ -304,7 +340,7 @@ Commands:
   status                Show current recording status.
   devices               Show detected ALSA hw capture devices.
   raw-devices           Show raw arecord device lines.
-  merge-last            Merge last session into one multichannel WAV using ffmpeg.
+  merge-last            Merge last WAV session into one multichannel WAV using ffmpeg.
   install-systemd-user  Install a systemd user service for one-button toggle.
 
 Config file:

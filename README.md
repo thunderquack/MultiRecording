@@ -38,6 +38,24 @@ detected capture devices.
 ./recordctl stop
 ```
 
+## Quality settings
+
+Settings live in `recordctl.conf`.
+
+- `CHANNELS="2"` enables stereo recording if the device supports it.
+- `OUTPUT_FORMAT="wav"` keeps the highest compatibility and easiest editing.
+- `OUTPUT_FORMAT="mp3"` writes smaller files using ffmpeg/libmp3lame.
+- `MP3_BITRATE="192k"` controls MP3 quality.
+- `RATE="48000"` is a good default for USB audio devices.
+
+Example stereo MP3 setup:
+
+```bash
+CHANNELS="2"
+OUTPUT_FORMAT="mp3"
+MP3_BITRATE="192k"
+```
+
 Or use one-button mode:
 
 ```bash
@@ -52,9 +70,9 @@ Recordings are saved into:
 recordings/session_YYYYMMDD_HHMMSS/
 ```
 
-Each matched capture device gets its own WAV file.
+Each matched capture device gets its own audio file.
 
-## Merge last session into one multichannel WAV
+## Merge last WAV session into one multichannel WAV
 
 ```bash
 ./recordctl merge-last
@@ -69,3 +87,5 @@ recordings/session_YYYYMMDD_HHMMSS/multitrack.wav
 ## Notes
 
 Separate USB sound cards are not sample-synchronous. For long recordings, tracks may drift. For exact synchronization, use a single multichannel audio interface.
+
+If you hear a constant hum or buzz, the cause is usually hardware or gain staging rather than the recording script: USB power noise, ground loops, cheap audio adapters, overloaded mic input, or analog cabling. Test one device at a time, reduce input gain, try a powered USB hub, and compare WAV vs MP3 before assuming software compression is the cause.
